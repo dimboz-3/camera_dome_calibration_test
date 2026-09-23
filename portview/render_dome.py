@@ -25,6 +25,7 @@ ap.add_argument("--spp", type=int, default=1, help="samples per pixel (validatio
 ap.add_argument("--r-inner", type=float, default=6.0, help="dome inner radius, m")
 ap.add_argument("--thickness", type=float, default=0.05, help="glass thickness, m")
 ap.add_argument("--depth-inside", type=float, default=0.01, help="camera depth inside inner surface, m")
+ap.add_argument("--only", choices=["noglass", "glass"], default=None, help="render just one variant")
 args = ap.parse_args()
 
 root = os.path.dirname(os.path.abspath(__file__))
@@ -98,6 +99,8 @@ dome = {
 }
 
 for tag, extra in (("noglass", {}), ("glass", dome)):
+    if args.only and tag != args.only:
+        continue
     sc = mi.load_dict(
         {
             "type": "scene",
