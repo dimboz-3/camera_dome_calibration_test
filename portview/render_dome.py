@@ -22,6 +22,9 @@ from scene import SceneParams, camera_pose, place_board, fovs
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument("--scale", type=int, default=1, help="resolution multiplier (base 480x384)")
 ap.add_argument("--spp", type=int, default=1, help="samples per pixel (validation: 1)")
+ap.add_argument("--r-inner", type=float, default=6.0, help="dome inner radius, m")
+ap.add_argument("--thickness", type=float, default=0.05, help="glass thickness, m")
+ap.add_argument("--depth-inside", type=float, default=0.01, help="camera depth inside inner surface, m")
 args = ap.parse_args()
 
 root = os.path.dirname(os.path.abspath(__file__))
@@ -32,7 +35,14 @@ if not os.path.exists(tex_path):
     scene.write_checker_texture(tex_path, 28, 20)
 
 # quarter test resolution, 1 spp per directive
-p = SceneParams(width=480 * args.scale, height=384 * args.scale, samples=args.spp)
+p = SceneParams(
+    r_inner=args.r_inner,
+    thickness=args.thickness,
+    depth_inside=args.depth_inside,
+    width=480 * args.scale,
+    height=384 * args.scale,
+    samples=args.spp,
+)
 
 board = place_board(p)
 obj_path = os.path.join(data, "board_dome.obj")
@@ -98,6 +108,6 @@ for tag, extra in (("noglass", {}), ("glass", dome)):
         }
     )
     image = mi.render(sc, spp=args.spp, seed=p.seed)
-    out_png = os.path.join(data, f"dome_board_{tag}_spp{args.spp}.png")
+    out_png = os.path.join(data, f"dome_board_{tag}_r{p.r_inner:g}_spp{args.spp}.png")
     mi.util.write_bitmap(out_png, image)
     print("wrote", out_png)
