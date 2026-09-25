@@ -27,6 +27,7 @@ def parse_args(argv):
     json_path = None
     outdir = None
     samples = 128
+    denoise = True
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -36,14 +37,18 @@ def parse_args(argv):
         elif a == "--samples":
             samples = int(argv[i + 1])
             i += 2
+        elif a == "--no-denoise":
+            denoise = False
+            i += 1
         else:
             json_path = a
             i += 1
     if not json_path:
         raise SystemExit(
-            "usage: blender_build.py <scene.json | folder> [-o outdir] [--samples N]"
+            "usage: blender_build.py <scene.json | folder> "
+            "[-o outdir] [--samples N] [--no-denoise]"
         )
-    return json_path, outdir, samples
+    return json_path, outdir, samples, denoise
 
 
 def wipe_scene():
@@ -99,9 +104,16 @@ def add_board(cfg, tex_path):
     b = cfg["board"]
     bpy.ops.mesh.primitive_plane_add(size=2.0, location=b["center"])
     obj = bpy.context.active_object
-    # plane local X/Y spans -1..1; after ry(-90): local X -> world Z, local Y -> world Y
-    obj.scale = (b["height"] / 2.0, b["width"] / 2.0, 1.0)
-    obj.rotation_euler = (0.0, -math.pi / 2.0, 0.0)  # plane normal -> world -X
+    # Texture mapping must match the Mitsuba OBJ exactly:
+    #   u (image columns, cols cells) -> image right = world -Y (u=0 at left)
+    #   v (image rows,    rows cells) -> world +Z, v=0 at the bottom
+    #   plane normal                  -> world -X (faces the camera)
+    # Blender euler XYZ (X applied first, then Y, then Z): Rx(+90) then
+    # Rz(-90) maps local X -> world -Y, local Y -> world +Z, local Z -> -X.
+    # (ry(-90) here put image u along world Z: the checker was rendered
+    # rotated 90 degrees on the board.)
+    obj.scale = (b["width"] / 2.0, b["height"] / 2.0, 1.0)
+    obj.rotation_euler = (math.pi / 2.0, 0.0, -math.pi / 2.0)
     obj.data.materials.append(make_board_material(tex_path))
     return obj
 
@@ -134,11 +146,11 @@ def set_world_black():
         bg.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)
 
 
-def configure_render(resolution, samples, out_png):
+def configure_render(resolution, samples, out_png, denoise=True):
     sc = bpy.context.scene
     sc.render.engine = "CYCLES"
     sc.cycles.samples = samples
-    sc.cycles.use_denoising = True
+    sc.cycles.use_denoising = denoise
     sc.cycles.device = "CPU"
     sc.render.resolution_x = resolution[0]
     sc.render.resolution_y = resolution[1]
@@ -150,7 +162,7 @@ def configure_render(resolution, samples, out_png):
     sc.render.filepath = out_png
 
 
-def render_json(json_path, outdir, samples):
+def render_json(json_path, outdir, samples, denoise=True):
     with open(json_path) as f:
         cfg = json.load(f)
 
@@ -169,7 +181,8 @@ def render_json(json_path, outdir, samples):
     add_camera(cfg)
     set_world_black()
     configure_render(
-        (cfg["camera"]["width"], cfg["camera"]["height"]), samples, out_png)
+        (cfg["camera"]["width"], cfg["camera"]["height"]), samples, out_png,
+        denoise)
 
     bpy.ops.render.render(write_still=True)
     print("rendered ->", out_png)
@@ -177,7 +190,7 @@ def render_json(json_path, outdir, samples):
 
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else sys.argv[1:]
-    json_path, outdir, samples = parse_args(argv)
+    json_path, outdir, samples, denoise = parse_args(argv)
 
     if os.path.isdir(json_path):
         files = sorted(glob.glob(os.path.join(json_path, "*.json")))
@@ -192,7 +205,8 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     for f in files:
         print("scene:", f)
-        render_json(f, outdir, samples)
+        render_json(f, outdir, samples, denoise)
 
 
-main()
+if __name__ == "__main__":
+    main()

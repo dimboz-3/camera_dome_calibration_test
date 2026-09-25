@@ -60,6 +60,78 @@ def detect_corners(path: str, pattern):
         raise RuntimeError(f"checker corners not found in {path} (pattern {pattern})")
     return corners.reshape(-1, 2).astype(np.float64)
 
+
+def dihedral_candidates(g: np.ndarray, pr: int, pc: int) -> dict:
+    """All 8 row/col flips of the corner grid plus the same 8 transposed.
+
+    cv2 returns the grid starting from an arbitrary corner and may run the
+    traversal column-major (it does so for boards imaged rotated by 90 deg),
+    so the raw ordering can be any of these 16 index permutations of the
+    canonical row-major top-left ordering.
+    """
+    gg = g.reshape(pr, pc, 2)
+    tg = gg.transpose(1, 0, 2)
+    out = {}
+    for name, m in (("id", gg), ("fx", gg[:, ::-1]), ("fy", gg[::-1]),
+                    ("r180", gg[::-1, ::-1]), ("t_id", tg), ("t_fx", tg[:, ::-1]),
+                    ("t_fy", tg[::-1]), ("t_r180", tg[::-1, ::-1])):
+        out[name] = m.reshape(-1, 2)
+    return out
+
+
+def canonical_order(corners: np.ndarray, pattern, gt_proj=None):
+    """Reorder detected corners to canonical row-major top-left ordering.
+
+    With a pinhole projection of the JSON corners_gt available, the candidate
+    whose corners best match it wins (exact). Otherwise a directional
+    heuristic is used: image rows must run +x and columns +y.
+    """
+    pr, pc = pattern[1], pattern[0]
+    cands = dihedral_candidates(corners, pr, pc)
+    if gt_proj is not None and gt_proj.shape == corners.shape:
+        scored = {k: float(np.linalg.norm(gt_proj - v, axis=1).mean())
+                  for k, v in cands.items()}
+        best = min(scored, key=scored.get)
+        return cands[best], best
+    scored = {}
+    for k, v in cands.items():
+        gg = v.reshape(pr, pc, 2)
+        scored[k] = float(np.diff(gg, axis=1)[..., 0].sum()
+                          + np.diff(gg, axis=0)[..., 1].sum())
+    best = max(scored, key=scored.get)
+    return cands[best], best
+
+
+def gt_projection(jpath: str, pattern):
+    """Pinhole projection of board.corners_gt using the JSON camera model.
+
+    The board sits inside the dome (corner rays aside, the board centre
+    region is seen directly), so the plain pinhole model is the right
+    reference for ordering; returned None on any mismatch.
+    """
+    try:
+        with open(jpath) as f:
+            cfg = json.load(f)
+        gt = np.asarray(cfg["board"]["corners_gt"], float)
+        if gt.shape != (pattern[0] * pattern[1], 3):
+            return None
+        cam = cfg["camera"]
+        pos = np.asarray(cam["position"], float)
+        look = np.asarray(cam["look_dir"], float)
+        look = look / np.linalg.norm(look)
+        up = np.asarray(cam["up"], float)
+        right = (np.asarray(cam["right"], float) if "right" in cam
+                 else np.cross(look, up))
+        right = right / np.linalg.norm(right)
+        fpx = float(cam["focal_px"])
+        cx, cy = (float(v) for v in cam["principal_px"])
+        d = gt - pos
+        z = d @ look
+        return np.stack([cx + fpx * (d @ right) / z,
+                         cy - fpx * (d @ up) / z], axis=1)
+    except (KeyError, ValueError, OSError):
+        return None
+
 def overlay(a_path: str, corners_a, corners_b, out_path: str, errs) -> None:
     img = cv2.imread(a_path, cv2.IMREAD_COLOR)
     for (x, y), e in zip(corners_a, errs):
@@ -74,9 +146,11 @@ def overlay(a_path: str, corners_a, corners_b, out_path: str, errs) -> None:
     cv2.imwrite(out_path, img)
 
 
-def compare_pair(a_path: str, b_path: str, pattern, outdir: str) -> dict:
-    ca = detect_corners(a_path, pattern)
-    cb = detect_corners(b_path, pattern)
+def compare_pair(a_path: str, b_path: str, pattern, outdir: str,
+                 gt_proj=None) -> dict:
+    ca, order_a = canonical_order(detect_corners(a_path, pattern), pattern, gt_proj)
+    cb, order_b = canonical_order(detect_corners(b_path, pattern), pattern, gt_proj)
+    print(f"  corner order: A={order_a} B={order_b}")
     if ca.shape != cb.shape:
         raise RuntimeError(
             f"corner count mismatch {a_path}: {ca.shape} vs {b_path}: {cb.shape}"
@@ -122,6 +196,7 @@ def append_summary(outdir: str, row: dict) -> None:
 
 def run_one(a_path, b_path, args, outdir):
     pattern = None
+    j = None
     if args.cells:
         pattern = (args.cells[0] - 1, args.cells[1] - 1)
     else:
@@ -131,10 +206,11 @@ def run_one(a_path, b_path, args, outdir):
     if pattern is None:
         pattern = (27, 19)
         print("note: no JSON sidecar found, assuming cells 28x20 -> pattern (27,19)")
+    gt_proj = gt_projection(j, pattern) if j else None
 
     base = os.path.basename(a_path)
     try:
-        res = compare_pair(a_path, b_path, pattern, outdir)
+        res = compare_pair(a_path, b_path, pattern, outdir, gt_proj)
     except RuntimeError as e:
         print(f"{base}: FAIL ({e})")
         append_summary(outdir, {"basename": base, "n": 0, "mean": -1, "median": -1,
